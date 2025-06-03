@@ -31,15 +31,15 @@ class QuestionSystem(QMainWindow):
         self.total_time = 50 * 60  # 50分钟倒计时
         self.remaining_time = self.total_time
         self.viewed_answers = set()  # 记录用户查看过答案的题目索引
-        self.submitted = False  # 新增：是否已提交
+        self.submitted = False  # 是否已提交
         self.start_time = None  # 记录开始时间
-        self.current_answer_file = None  # 新增：当前答题文件路径
+        self.current_answer_file = None  # 当前答题文件路径
 
         # 初始化必要的目录和文件
         self._init_directories_and_files()
 
-        # 设置窗口 - 改为70%
-        self.setWindowTitle("v1.0.0-alpha")
+        # 设置窗口
+        self.setWindowTitle("Xdhdyp-BKT")
         self.setGeometry(100, 100, 1344, 756)  # 16:9比例，占屏幕70%
         self.center_window()
 
@@ -127,7 +127,7 @@ class QuestionSystem(QMainWindow):
         left_layout = QVBoxLayout(left_frame)
 
         # 题号按钮标题
-        title_label = QLabel("题目导航")
+        title_label = QLabel("题号")
         title_label.setFont(QFont("微软雅黑", 14, QFont.Weight.Bold))
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         left_layout.addWidget(title_label)
@@ -188,7 +188,7 @@ class QuestionSystem(QMainWindow):
         parent_layout.addWidget(right_frame)
 
     def create_top_info_bar(self, parent_layout):
-        """创建顶部信息栏"""
+        """创建顶部信息栏，并为统计项添加可点击按钮"""
         top_layout = QHBoxLayout()
 
         # 当前题号
@@ -293,12 +293,12 @@ class QuestionSystem(QMainWindow):
 
     def load_local_excel(self):
         """尝试加载本地Excel文件"""
-        # 检查当前目录下是否有单选题.xlsx文件
         local_file = os.path.join(os.getcwd(), "data", "static", "单选题.xlsx")
+        logging.info(f"尝试加载题库文件: {local_file}")
         if os.path.exists(local_file):
             self.load_excel_from_path(local_file)
         else:
-            # 没有找到本地文件，显示提示信息
+            logging.error("题库文件不存在！")
             self.show_no_questions_message()
         self.current_answer_file = None  # 新增：当前答题文件路径
 
@@ -325,49 +325,10 @@ class QuestionSystem(QMainWindow):
         try:
             df = pd.read_excel(file_path)
             required_columns = ['题号', '题目', '选项A', '选项B', '选项C', '选项D', '答案']
-
             if all(col in df.columns for col in required_columns):
-                # 保存原始数据
                 original_data = df.to_dict('records')
-                
-                # 尝试加载模型推荐
-                try:
-                    from models.question_processor import QuestionProcessor
-                    processor = QuestionProcessor(self.username)
-                    
-                    # 获取最新的推荐文件
-                    recommendation_dir = Path("data/models/model_yh")
-                    if recommendation_dir.exists():
-                        recommendation_files = sorted(
-                            recommendation_dir.glob(f"recommendation_*.json"),
-                            key=lambda x: x.stat().st_mtime,
-                            reverse=True
-                        )
-                        
-                        if recommendation_files:
-                            # 读取最新的推荐
-                            with open(recommendation_files[0], 'r', encoding='utf-8') as f:
-                                recommendation = json.load(f)
-                                recommended_questions = recommendation.get('recommended_questions', [])
-                                
-                                # 如果推荐题目不足50题，随机补充
-                                if len(recommended_questions) < 50:
-                                    remaining = list(set(range(len(original_data))) - set(recommended_questions))
-                                    recommended_questions.extend(random.sample(remaining, 50 - len(recommended_questions)))
-                                
-                                # 使用推荐的题目顺序
-                                self.original_indices = recommended_questions[:50]
-                        else:
-                            # 如果没有推荐文件，使用随机顺序
-                            self.original_indices = random.sample(range(len(original_data)), 50)
-                    else:
-                        # 如果没有推荐目录，使用随机顺序
-                        self.original_indices = random.sample(range(len(original_data)), 50)
-                except Exception as e:
-                    logging.error(f"加载推荐失败，使用随机顺序: {e}")
-                    self.original_indices = random.sample(range(len(original_data)), 50)
-                
-                # 根据顺序重新排列题目
+                # 每次都重新初始化题目顺序
+                self.original_indices = random.sample(range(len(original_data)), 50)
                 self.questions = [original_data[i] for i in self.original_indices]
                 
                 # 新增：判断单选/多选
@@ -394,10 +355,10 @@ class QuestionSystem(QMainWindow):
                 
                 auto_information(self, "成功", f"成功加载 {len(self.questions)} 道题目")
             else:
-                auto_warning(self, "错误", "Excel文件格式不正确，请确保包含所需列：" + ", ".join(required_columns))
+                logging.error("Excel文件缺少必要列")
                 self.show_no_questions_message()
         except Exception as e:
-            auto_critical(self, "错误", f"加载文件失败：{str(e)}")
+            logging.error(f"加载题库失败: {e}")
             self.show_no_questions_message()
 
     def enable_interface(self):
@@ -703,15 +664,51 @@ class QuestionSystem(QMainWindow):
         total_count = len(self.questions)
         wrong_questions = set()
 
+        # 初始化BKT模型
+        from models.bkt_model import BKTModel
+        bkt_model = BKTModel()
+
+        # 收集答题历史
+        answer_history = {}
         for i, question in enumerate(self.questions):
-            if i in self.viewed_answers:
-                continue
-            if i in self.user_answers and self.user_answers[i] == question['答案']:
-                correct_count += 1
-            else:
-                wrong_questions.add(i)
+            q_id = str(i + 1)  # 转换为1开始的题号
+            if q_id not in answer_history:
+                answer_history[q_id] = []
+            
+            # 判断答案是否正确
+            is_correct = False
+            if i in self.user_answers and i not in self.viewed_answers:
+                user_ans = self.user_answers[i]
+                correct_ans = str(question['答案']).strip()
+                is_correct = user_ans == correct_ans
+                if is_correct:
+                    correct_count += 1
+                else:
+                    wrong_questions.add(i)
+            
+            # 添加到答题历史
+            answer_history[q_id].append({
+                'answer': self.user_answers.get(i, ''),
+                'is_correct': is_correct,
+                'timestamp': datetime.now().isoformat()
+            })
 
         score = (correct_count / total_count) * 100 if total_count > 0 else 0
+
+        # 使用BKT模型计算掌握度
+        mastery = bkt_model.calculate_mastery(answer_history)
+        
+        # 判断已掌握题目
+        mastered_questions = set()
+        for q_id, mastery_data in mastery.items():
+            # 使用BKT掌握概率判断
+            bkt_prob = mastery_data['mastery_probability']
+            correct_rate = mastery_data['correct_rate']
+            attempt_count = mastery_data['attempt_count']
+            
+            # 如果BKT掌握概率大于0.7，且正确率大于0.6，且至少做过2次，则认为已掌握
+            if bkt_prob > 0.7 and correct_rate > 0.6 and attempt_count >= 2:
+                mastered_questions.add(int(q_id) - 1)  # 转换回0开始的索引
 
         # 显示所有答案
         self.answer_frame.show()
@@ -721,7 +718,7 @@ class QuestionSystem(QMainWindow):
         self.update_question_buttons()
 
         # 显示得分信息
-        result_text = f"""考试结束！\n总题数：{total_count}\n已答题数：{len(self.user_answers)}\n正确题数：{correct_count}\n得分：{score:.1f}分"""
+        result_text = f"""考试结束！\n总题数：{total_count}\n已答题数：{len(self.user_answers)}\n正确题数：{correct_count}\n得分：{score:.1f}分\n已掌握题目数：{len(mastered_questions)}"""
 
         auto_information(self, "考试结束", result_text)
 
@@ -747,7 +744,16 @@ class QuestionSystem(QMainWindow):
             "submitted": True,
             "viewed_answers": list(self.viewed_answers),
             "remaining_time": self.remaining_time,
-            "unanswered_questions": [i for i in range(len(self.questions)) if i not in self.user_answers]
+            "unanswered_questions": [i for i in range(len(self.questions)) if i not in self.user_answers],
+            "mastered_questions": list(mastered_questions),
+            "mastery_data": {
+                q_id: {
+                    "mastery_probability": data["mastery_probability"],
+                    "correct_rate": data["correct_rate"],
+                    "attempt_count": data["attempt_count"]
+                }
+                for q_id, data in mastery.items()
+            }
         }
 
         try:
@@ -762,11 +768,24 @@ class QuestionSystem(QMainWindow):
             # 删除save目录下的所有临时文件
             save_dir = Path('data/recommendation/save')
             if save_dir.exists():
-                for temp_file in save_dir.glob(f"answers_{self.username}_*.json"):
+                # 获取所有该用户的临时文件
+                temp_files = list(save_dir.glob(f"answers_{self.username}_*.json"))
+                for temp_file in temp_files:
                     try:
-                        temp_file.unlink()
+                        # 确保文件存在且可访问
+                        if temp_file.exists() and temp_file.is_file():
+                            # 尝试关闭可能打开的文件句柄
+                            try:
+                                if hasattr(self, 'current_answer_file') and self.current_answer_file:
+                                    with open(self.current_answer_file, 'r') as f:
+                                        pass  # 确保文件句柄已关闭
+                            except:
+                                pass
+                            # 删除文件
+                            temp_file.unlink()
+                            logging.info(f"成功删除临时文件: {temp_file}")
                     except Exception as e:
-                        logging.error(f"删除临时文件失败: {e}")
+                        logging.error(f"删除临时文件失败 {temp_file}: {e}")
 
             self.current_answer_file = None
 
@@ -774,6 +793,17 @@ class QuestionSystem(QMainWindow):
             from models.question_processor import QuestionProcessor
             processor = QuestionProcessor(self.username)
             processor.process_answer_file(file_path)
+
+            # 删除旧的推荐文件
+            recommendation_dir = Path("data/models/model_yh")
+            if recommendation_dir.exists():
+                old_recommendations = list(recommendation_dir.glob("recommendation_*.json"))
+                for old_file in old_recommendations:
+                    try:
+                        old_file.unlink()
+                        logging.info(f"成功删除旧推荐文件: {old_file}")
+                    except Exception as e:
+                        logging.error(f"删除旧推荐文件失败 {old_file}: {e}")
 
         except Exception as e:
             logging.error(f"保存历史记录失败: {e}")
@@ -789,9 +819,13 @@ class QuestionSystem(QMainWindow):
             'user_answers': self.user_answers,
             'viewed_answers': list(self.viewed_answers),
             'original_indices': self.original_indices,
-            'question_times': {}
+            'question_times': {},
+            'mastered_questions': list(mastered_questions),
+            'mastery_data': save_data['mastery_data']
         }
         self.answer_submitted.emit(answer_data)
+
+        self.mastered_questions = mastered_questions  # 保存到self，供统计用
 
     def load_answer_file(self, file_path):
         """加载保存的答案文件"""
@@ -897,15 +931,20 @@ class QuestionSystem(QMainWindow):
             self.load_local_excel()  # 如果加载失败，重新加载题库
 
     def closeEvent(self, event):
-        """处理窗口关闭事件"""
+        """处理窗口关闭事件
+        1. 只有未提交时才自动保存答题进度到 save 目录，并弹出主界面。
+        2. 如果已提交（self.submitted == True），则不再保存、不再弹主界面，直接关闭窗口。
+        这样可避免提交后出现两个主界面，也不会生成多余 save 文件影响掌握度统计。
+        """
         try:
-            # 自动保存当前状态
-            self.auto_save_answers()
-            # 显示主窗口
-            from main_window import MainWindow
-            main_window = MainWindow(username=self.username)
-            main_window.show()
-            # 关闭当前窗口
+            # 只有未提交时才自动保存
+            if not self.submitted:
+                self.auto_save_answers()
+                # 只在未提交时弹主界面
+                from main_window import MainWindow
+                main_window = MainWindow(username=self.username)
+                main_window.show()
+            # 如果已提交，什么都不做，直接关闭
             event.accept()
         except Exception as e:
             logging.error(f"关闭窗口时发生错误: {e}")
@@ -951,5 +990,5 @@ def main():
     sys.exit(app.exec())
 
 
-if __name__ == '__main__':
-    main()
+# if __name__ == '__main__':
+#     main()

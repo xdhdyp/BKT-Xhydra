@@ -180,14 +180,6 @@ class DataUtils:
             logging.error(f"验证用户失败: {e}")
             return False, f"验证用户时发生错误：{str(e)}"
 
-    def _validate_username(self, username):
-        """验证用户名格式（已废弃，始终返回True）"""
-        return True
-
-    def _validate_password(self, password):
-        """验证密码强度（已废弃，始终返回True）"""
-        return True
-
     def _hash_username(self, username):
         """
         对用户名进行哈希处理

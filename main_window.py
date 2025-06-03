@@ -1,7 +1,7 @@
 import sys
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QPushButton, QLabel, QMessageBox, QListWidget, QDialog
+    QPushButton, QLabel, QMessageBox, QListWidget, QDialog, QScrollArea, QGridLayout, QHBoxLayout, QSpacerItem, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QSettings, QTimer
 from PyQt6.QtGui import QIcon, QPixmap
@@ -14,6 +14,8 @@ import pandas as pd
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import os
+from update_checker import UpdateChecker
+import webbrowser
 
 # ----------- 中文支持 -----------
 import matplotlib
@@ -31,9 +33,10 @@ class MainWindow(QMainWindow):
         self._init_window()
         self._init_ui()
         
-        # 初始化答题记录目录
-        # self.answer_dir = Path("data/answers")
-        # self.answer_dir.mkdir(parents=True, exist_ok=True)
+        # 初始化题目编号集合
+        self.all_question_indices = set()
+        self.done_question_indices = set()
+        self.unmastered_indices = set()
         
         # 加载用户数据
         self._load_user_data()
@@ -43,6 +46,13 @@ class MainWindow(QMainWindow):
         
         # 设置窗口关闭事件处理
         self.closeEvent = self._handle_close_event
+        
+        # 初始化更新检查器
+        self.update_checker = UpdateChecker()
+        self.update_checker.update_available.connect(self._handle_update_available)
+        
+        # 启动时检查更新
+        QTimer.singleShot(1000, self._check_for_updates)
 
     def _init_state(self):
         """初始化状态变量"""
@@ -88,12 +98,19 @@ class MainWindow(QMainWindow):
                 
         except Exception as e:
             logging.error(f"加载用户数据失败: {e}")
-            auto_warning(self, "警告", "加载用户数据失败，将使用默认设置")
+            # 只在有update_progress_labels时调用，否则忽略
+            if hasattr(self, 'update_progress_labels'):
+                self.total_label.setText("总题目数：0")
+                self.done_btn.setText("已做题目数：0")
+                self.undone_btn.setText("未做题目数：0")
+                self.unmastered_btn.setText("未掌握题目数：0")
             self.user_data = {
                 "用户名": self.username,
                 "考试记录": {},
                 "当前考试": {}
             }
+
+        self._update_progress_labels()
 
     def _update_progress(self):
         """更新学习进度（基于所有历史记录）"""
@@ -101,62 +118,112 @@ class MainWindow(QMainWindow):
             # 读取题库
             question_file = Path("data/static/单选题.xlsx")
             if not question_file.exists():
-                self.progress_label.setText("题库不存在")
+                if hasattr(self, 'progress_label'):
+                    self.progress_label.setText("题库不存在")
                 return
             df = pd.read_excel(question_file)
             questions = df.to_dict('records')
             total = len(questions)
+            all_indices = set(range(1, total + 1))  # 题号从1开始
 
-            # 合并所有历史答题记录
+            # 遍历所有历史答题记录，收集已做题目编号
             history_dir = Path("data/recommendation/history")
             answer_files = list(history_dir.glob(f"answers_{self.username}_*.json"))
-            question_stats = {i: {'correct': 0, 'wrong': 0, 'done': 0} for i in range(total)}
+            done_indices = set()
+            
+            # 初始化BKT模型
+            from models.bkt_model import BKTModel
+            bkt_model = BKTModel()
+            
+            # 处理所有答题记录
+            answer_history = {}
             for answer_file in answer_files:
                 try:
                     with open(answer_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                         q_order = data.get('original_indices', [])
-                        u_ans = data.get('answers', {})
-                        for idx_str, ans in u_ans.items():
-                            idx = int(idx_str)
-                            if idx < len(q_order):
-                                real_idx = q_order[idx]
-                                correct_ans = str(questions[real_idx]['答案']).strip().upper()
-                                if str(ans).strip().upper() == correct_ans:
-                                    question_stats[real_idx]['correct'] += 1
-                                else:
-                                    question_stats[real_idx]['wrong'] += 1
-                                question_stats[real_idx]['done'] += 1
+                        user_answers = data.get('user_answers', {})
+                        correct_answers = data.get('correct_answers', {})
+                        
+                        # 收集答题历史
+                        for idx in q_order:
+                            q_id = str(idx + 1)  # 转换为1开始的题号
+                            if q_id not in answer_history:
+                                answer_history[q_id] = []
+                            
+                            user_ans = user_answers.get(str(idx), '')
+                            correct_ans = correct_answers.get(str(idx), '')
+                            is_correct = user_ans.strip().upper() == correct_ans.strip().upper()
+                            
+                            answer_history[q_id].append({
+                                'answer': user_ans,
+                                'is_correct': is_correct,
+                                'timestamp': data.get('timestamp', datetime.now().isoformat())
+                            })
+                            
+                            # 记录已做题目
+                            done_indices.add(idx + 1)
                 except Exception as e:
                     logging.error(f"读取答题文件失败 {answer_file}: {e}")
                     continue
 
-            mastered = sum(1 for stat in question_stats.values() if stat['correct'] >= 5 and stat['wrong'] == 0)
-            unmastered = sum(1 for stat in question_stats.values() if stat['done'] > 0 and (stat['correct'] < 5 or stat['wrong'] > 0))
-            undone = sum(1 for stat in question_stats.values() if stat['done'] == 0)
-            remaining = unmastered + undone
+            # 使用BKT模型计算掌握度
+            mastery = bkt_model.calculate_mastery(answer_history)
+            
+            # 判断已掌握题目
+            mastered_indices = set()
+            for q_id, mastery_data in mastery.items():
+                # 使用BKT掌握概率判断
+                bkt_prob = mastery_data['mastery_probability']
+                correct_rate = mastery_data['correct_rate']
+                attempt_count = mastery_data['attempt_count']
+                
+                # 如果BKT掌握概率大于0.7，且正确率大于0.6，且至少做过2次，则认为已掌握
+                if bkt_prob > 0.7 and correct_rate > 0.6 and attempt_count >= 2:
+                    mastered_indices.add(int(q_id))
+            
+            # 计算未掌握题目
+            unmastered_indices = done_indices - mastered_indices
+            undone_indices = all_indices - done_indices
+
+            self.done_question_indices = done_indices
+            self.unmastered_indices = unmastered_indices
+            self.all_question_indices = all_indices
+
+            # 统计数据
+            done = len(done_indices)
+            undone = len(undone_indices)
+            unmastered = len(unmastered_indices)
+            mastered = len(mastered_indices)
 
             self.progress.update({
                 'total': total,
-                'remaining': remaining,
-                'unmastered': unmastered,
+                'done': done,
                 'undone': undone,
+                'unmastered': unmastered,
                 'mastered': mastered
             })
 
+            # 更新进度显示
             if hasattr(self, 'progress_label'):
                 self.progress_label.setText(
-                    f"剩余题目数：{remaining}\n未掌握题目数：{unmastered}"
+                    f"总题目数：{total}\n"
+                    f"已做题目数：{done}\n"
+                    f"未做题目数：{undone}\n"
+                    f"已掌握题目数：{mastered}\n"
+                    f"未掌握题目数：{unmastered}"
                 )
 
-            # 可视化数据
+            # 更新饼图
             if hasattr(self, 'progress_pie'):
                 self._update_progress_pie(mastered, unmastered, undone)
 
         except Exception as e:
             logging.error(f"更新进度失败: {e}")
             if hasattr(self, 'progress_label'):
-                self.progress_label.setText("剩余题目数：0\n未掌握题目数：0")
+                self.progress_label.setText("总题目数：0\n已做题目数：0\n未做题目数：0\n未掌握题目数：0")
+
+        self._update_progress_labels()
 
     def _update_ui(self):
         """更新UI显示"""
@@ -172,6 +239,8 @@ class MainWindow(QMainWindow):
         else:
             self.continue_btn.setEnabled(False)
             self.continue_btn.setToolTip("没有未完成的考试")
+
+        self._update_progress_labels()
 
     def _update_recent_exams(self):
         """更新最近考试记录"""
@@ -198,16 +267,26 @@ class MainWindow(QMainWindow):
                 except Exception:
                     continue
                     
-            # TODO: 更新最近考试记录显示
-            pass
+            # 更新最近考试记录显示
+            if hasattr(self, 'recent_exams_list'):
+                self.recent_exams_list.clear()
+                for exam in recent_exams:
+                    self.recent_exams_list.addItem(
+                        f"{exam['date']} - 得分：{exam['score']} ({exam['correct']}/{exam['total']})"
+                    )
             
         except Exception as e:
             logging.error(f"更新最近考试记录失败: {e}")
 
     def _update_charts(self):
         """更新图表显示"""
-        # TODO: 实现图表更新
-        pass
+        # 更新进度饼图
+        if hasattr(self, 'progress_pie'):
+            self._update_progress_pie(
+                self.progress.get('mastered', 0),
+                self.progress.get('unmastered', 0),
+                self.progress.get('undone', 0)
+            )
 
     def _init_window(self):
         """初始化窗口属性"""
@@ -264,10 +343,36 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(welcome_label)
         left_layout.addSpacing(20)
         
-        # 进度信息
-        self.progress_label = QLabel("剩余题目数：0\n未掌握题目数：0")
-        self.progress_label.setStyleSheet("font-size: 22px; margin-bottom: 20px;")
-        left_layout.addWidget(self.progress_label)
+        # 统计信息
+        self.total_label = QLabel()
+        self.done_label = QLabel()
+        self.undone_label = QLabel()
+        self.mastered_label = QLabel()
+        self.unmastered_label = QLabel()
+        # 设置字体样式
+        for label in [self.total_label, self.done_label, self.undone_label, self.mastered_label, self.unmastered_label]:
+            label.setStyleSheet("font-size: 22px; color: #000; margin-bottom: 6px; font-weight: bold;")
+
+        # 第一行：总题目数
+        left_layout.addWidget(self.total_label)
+
+        # 后四行：统计+按钮
+        for label, btn_func in [
+            (self.done_label, self._show_done_indices),
+            (self.undone_label, self._show_undone_indices),
+            (self.mastered_label, self._show_mastered_indices),
+            (self.unmastered_label, self._show_unmastered_indices),
+        ]:
+            h = QHBoxLayout()
+            h.addWidget(label)
+            btn = QPushButton("🔍")
+            btn.setFixedWidth(30)
+            btn.setStyleSheet("padding:0;")
+            btn.clicked.connect(btn_func)
+            h.addWidget(btn)
+            h.addStretch()
+            left_layout.addLayout(h)
+
         left_layout.addSpacing(30)
         
         # 按钮组
@@ -299,6 +404,7 @@ class MainWindow(QMainWindow):
             left_layout.addSpacing(15)
             
         left_layout.addStretch()
+        self._update_progress_labels()
         return left_widget
 
     def _create_right_panel(self):
@@ -337,11 +443,12 @@ class MainWindow(QMainWindow):
                         data = json.load(f)
                     data['submitted'] = True
                     
-                    # 保存到history
-                    os.makedirs('data/recommendation/history', exist_ok=True)
+                    # 保存到history，使用统一的文件名格式
+                    history_dir = Path('data/recommendation/history')
+                    history_dir.mkdir(parents=True, exist_ok=True)
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"answers_{self.username}_{timestamp}.json"
-                    history_file = os.path.join('data', 'recommendation', 'history', filename)
+                    history_file = history_dir / f"answers_{self.username}_{timestamp}.json"
+                    
                     with open(history_file, 'w', encoding='utf-8') as f:
                         json.dump(data, f, ensure_ascii=False, indent=2)
                     
@@ -355,7 +462,7 @@ class MainWindow(QMainWindow):
                     # 处理答题记录并生成推荐
                     from models.question_processor import QuestionProcessor
                     processor = QuestionProcessor(self.username)
-                    processor.process_answer_file(history_file)
+                    processor.process_answer_file(str(history_file))
             
             # 开始新的答题
             from system import QuestionSystem
@@ -455,9 +562,9 @@ class MainWindow(QMainWindow):
         # 顶部关于信息
         about_label = QLabel(
             "<b>模拟考试系统</b><br>"
-            "版本：v1.0.0-alpha<br>"
+            "版本：v1.2.18<br>"
             "开发者：xdhdyp<br>"
-            "更新地址：<a href='https://your-update-url.com'>https://your-update-url.com</a><br>"
+            "更新地址：<a href='https://github.com/xdhdyp/Xdhdyp-BKT'>https://github.com/xdhdyp/Xdhdyp-BKT</a><br>"
             "<br>"
             "本软件为个人学习与模拟考试用途开发。<br>"
             "如需升级请联系开发者，或关注后续版本发布。<br>"
@@ -466,6 +573,27 @@ class MainWindow(QMainWindow):
         about_label.setOpenExternalLinks(True)
         about_label.setTextFormat(Qt.TextFormat.RichText)
         main_layout.addWidget(about_label, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # GitHub按钮区域
+        github_btn_layout = QHBoxLayout()
+        github_btn = QPushButton("  GitHub")
+        github_btn.setIcon(QIcon("data/static/github.png"))  # 图标路径
+        github_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #24292f;
+                color: white;
+                border-radius: 8px;
+                padding: 8px 20px;
+                font-size: 18px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #444c56;
+            }
+        """)
+        github_btn.clicked.connect(lambda: webbrowser.open("https://github.com/xdhdyp/Xdhdyp-BKT"))
+        github_btn_layout.addWidget(github_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        main_layout.addLayout(github_btn_layout)
 
         # 二维码区域
         qr_layout = QHBoxLayout()
@@ -558,7 +686,27 @@ class MainWindow(QMainWindow):
                         break
                 data_utils.write_data(data)
             
-            # 更新UI
+            # 保存答题记录到历史文件
+            history_dir = Path('data/recommendation/history')
+            history_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 使用统一的文件名格式
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            history_file = history_dir / f"answers_{self.username}_{timestamp}.json"
+            
+            # 添加时间戳到答题数据
+            answer_data['timestamp'] = datetime.now().isoformat()
+            
+            # 保存答题记录
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(answer_data, f, ensure_ascii=False, indent=2)
+            
+            # 处理答题记录并生成推荐
+            from models.question_processor import QuestionProcessor
+            processor = QuestionProcessor(self.username)
+            processor.process_answer_file(str(history_file))
+            
+            # 关键：更新UI，刷新全部UI（进度区、最近考试、图表等）
             self._update_ui()
             
             # 显示主窗口
@@ -588,8 +736,17 @@ class MainWindow(QMainWindow):
                 try:
                     with open(file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
+                        # 检查是否已提交且未过期
                         if not data.get('submitted', False):
-                            return str(file)
+                            # 检查是否超过考试时间
+                            if 'start_time' in data:
+                                start_time = datetime.fromisoformat(data['start_time'])
+                                current_time = datetime.now()
+                                time_diff = (current_time - start_time).total_seconds()
+                                if time_diff <= 50 * 60:  # 50分钟
+                                    return str(file)
+                            else:
+                                return str(file)
                 except Exception as e:
                     logging.error(f"读取文件失败 {file}: {e}")
                     continue
@@ -667,6 +824,143 @@ class MainWindow(QMainWindow):
                   title="图例", loc='upper right', bbox_to_anchor=(1.125, 1.125), fontsize=10, title_fontsize=10)
         ax.axis('equal')
         self.progress_pie.draw()
+
+    def _check_for_updates(self):
+        """检查更新"""
+        try:
+            self.update_checker.check_for_updates()
+        except Exception as e:
+            logging.error(f"检查更新失败: {e}")
+
+    def _handle_update_available(self, new_version, update_info):
+        """处理发现新版本"""
+        self.update_checker.show_update_dialog(self, new_version, update_info)
+
+    # 更新进度标签内容
+    def _update_progress_labels(self):
+        """同步更新统计数字"""
+        self.total_label.setText(f"总题目数：{self.progress.get('total', 0)}")
+        self.done_label.setText(f"已做题目数：{self.progress.get('done', 0)}")
+        self.undone_label.setText(f"未做题目数：{self.progress.get('undone', 0)}")
+        self.mastered_label.setText(f"已掌握题目数：{self.progress.get('mastered', 0)}")
+        self.unmastered_label.setText(f"未掌握题目数：{self.progress.get('unmastered', 0)}")
+
+    # 显示已做题目编号
+    def _show_done_indices(self):
+        """弹窗显示已做题目编号"""
+        indices = sorted(self.done_question_indices)
+        self._show_indices_dialog("已做题目编号", indices)
+
+    # 显示未做题目编号
+    def _show_undone_indices(self):
+        """弹窗显示未做题目编号"""
+        indices = sorted(self.all_question_indices - self.done_question_indices)
+        self._show_indices_dialog("未做题目编号", indices)
+
+    # 显示已掌握题目编号
+    def _show_mastered_indices(self):
+        """弹窗显示已掌握题目编号"""
+        indices = sorted(self.all_question_indices - self.unmastered_indices - (self.all_question_indices - self.done_question_indices))
+        self._show_indices_dialog("已掌握题目编号", indices)
+
+    # 显示未掌握题目编号
+    def _show_unmastered_indices(self):
+        """弹窗显示未掌握题目编号"""
+        indices = sorted(self.unmastered_indices)
+        self._show_indices_dialog("未掌握题目编号", indices)
+
+    # 通用弹窗显示编号（每个编号可点击预览题目）
+    def _show_indices_dialog(self, title, indices):
+        """弹窗显示全部编号，每行5个编号按钮，可点击预览题目，内容少时自动缩放，高于一页时滚动"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QScrollArea, QWidget, QGridLayout, QHBoxLayout, QSpacerItem, QSizePolicy
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setMinimumWidth(400)
+        dialog.setMaximumHeight(500)  # 最大高度，超出则滚动
+
+        layout = QVBoxLayout(dialog)
+        label = QLabel(f"共 {len(indices)} 个")
+        layout.addWidget(label)
+
+        # 滚动区域
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(400)  # 超过400才滚动，否则自适应
+        inner = QWidget()
+
+        # grid布局装按钮
+        grid = QGridLayout()
+        for idx, qid in enumerate(indices):
+            btn = QPushButton(str(qid))
+            btn.setStyleSheet("min-width:60px; min-height:28px;")
+            btn.clicked.connect(lambda _, i=qid: self._preview_question(i))
+            row = idx // 5
+            col = idx % 5
+            grid.addWidget(btn, row, col)
+
+        # 外层hbox，左边是grid，右边加spacer
+        hbox = QHBoxLayout()
+        hbox.addLayout(grid)
+        hbox.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
+        inner.setLayout(hbox)
+
+        scroll.setWidget(inner)
+        layout.addWidget(scroll)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+
+        # 让弹窗高度自适应内容（但不超过最大高度）
+        dialog.adjustSize()
+        dialog.exec()
+
+    def _preview_question(self, q_index):
+        """
+        预览指定题号的题干、选项和答案，自动去除选项内容前的A. B.等前缀
+        """
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton
+        import pandas as pd
+        from pathlib import Path
+
+        # 读取题库
+        question_file = Path("data/static/单选题.xlsx")
+        if not question_file.exists():
+            return
+
+        df = pd.read_excel(question_file)
+        questions = df.to_dict('records')
+        # 题号从1开始
+        if not (1 <= q_index <= len(questions)):
+            return
+
+        q = questions[q_index - 1]
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"题目预览 - 编号{q_index}")
+        dialog.setFixedSize(500, 350)
+        layout = QVBoxLayout(dialog)
+
+        # 题干
+        layout.addWidget(QLabel(f"<b>题目：</b>{q.get('题目', '')}"))
+
+        # 选项（去除A. B.等前缀）
+        for opt in ['A', 'B', 'C', 'D']:
+            text = str(q.get('选项'+opt, '')).strip()
+            # 去除前缀"A."、"A．"、"A、"、"A "等
+            for prefix in [f"{opt}.", f"{opt}．", f"{opt}、", f"{opt} "]:
+                if text.startswith(prefix):
+                    text = text[len(prefix):].strip()
+                    break
+            layout.addWidget(QLabel(f"{opt}. {text}"))
+
+        # 答案
+        layout.addWidget(QLabel(f"<b>正确答案：</b>{q.get('答案', '')}"))
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        dialog.exec()
 
 def auto_information(parent, title, text, timeout=1500):
     box = QMessageBox(parent)

@@ -4,7 +4,14 @@ import traceback
 from pathlib import Path
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtGui import QIcon
-from login_window import LoginWindow
+from PyQt6.QtCore import QTimer
+
+# 添加库路径
+if getattr(sys, 'frozen', False):
+    # 如果是打包后的程序
+    lib_path = Path(sys._MEIPASS) / 'lib'
+    if lib_path.exists():
+        sys.path.insert(0, str(lib_path))
 
 # 配置日志
 logging.basicConfig(
@@ -47,7 +54,7 @@ def setup_application():
         # 设置应用程序信息
         app = QApplication(sys.argv)
         app.setApplicationName("原神！启动！！！")
-        app.setApplicationVersion("v1.0.0-alpha")
+        app.setApplicationVersion("alpha")
         app.setOrganizationName("原神！启动！！！")
         app.setOrganizationDomain("原神！启动！！！")
         
@@ -59,30 +66,23 @@ def setup_application():
         if not app_icon.isNull():
             app.setWindowIcon(app_icon)
         
-        # 设置高DPI支持
-        # 在 PyQt6 中，这些属性已经被移除，因为高 DPI 支持现在是默认启用的
-        # 如果需要禁用高 DPI 缩放，可以使用环境变量：
-        # os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"
-        
         return app
     except Exception as e:
         logger.error(f"应用程序初始化失败: {str(e)}")
         logger.error(traceback.format_exc())
         raise
 
-# def cleanup_application():
-#     """清理应用程序资源"""
-#     try:
-#         # 清理临时文件
-#         temp_dir = Path("data/answers")
-#         if temp_dir.exists():
-#             for temp_file in temp_dir.glob("temp_answer_*.json"):
-#                 try:
-#                     temp_file.unlink()
-#                 except Exception as e:
-#                     logger.warning(f"清理临时文件失败 {temp_file}: {e}")
-#     except Exception as e:
-#         logger.error(f"清理应用程序资源失败: {e}")
+def load_login_window():
+    """延迟加载登录窗口"""
+    try:
+        from login_window import LoginWindow
+        window = LoginWindow()
+        window.show()
+        return window
+    except Exception as e:
+        logger.error(f"加载登录窗口失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
 
 def main():
     """主函数：创建并显示应用程序窗口"""
@@ -90,12 +90,8 @@ def main():
         # 设置应用程序
         app = setup_application()
         
-        # 创建并显示登录窗口
-        window = LoginWindow()
-        window.show()
-        
-        # # 注册清理函数
-        # app.aboutToQuit.connect(cleanup_application)
+        # 使用QTimer延迟加载登录窗口，提高启动速度
+        QTimer.singleShot(100, load_login_window)
         
         # 执行应用程序的主循环
         exit_code = app.exec()
