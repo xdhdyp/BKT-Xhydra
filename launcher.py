@@ -25,16 +25,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def get_version():
-    """获取当前版本号"""
+    """只从 data/static/version.txt 读取版本号，读取失败返回空字符串"""
     try:
-        version_file = Path("version.txt")
+        version_file = Path("data/static/version.txt")
         if version_file.exists():
             with open(version_file, "r") as f:
-                return f.read().strip()
-        return "1.2.20"  # 默认版本号
+                version = f.read().strip()
+                if version:
+                    return version
+        logging.error("version.txt 文件不存在或内容为空")
+        return ""
     except Exception as e:
         logging.error(f"读取版本号失败: {e}")
-        return "1.2.20"  # 默认版本号
+        return ""
 
 def exception_hook(exctype, value, tb):
     """全局异常处理钩子"""

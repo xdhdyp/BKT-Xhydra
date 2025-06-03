@@ -20,7 +20,7 @@ class UpdateChecker(QObject):
     def _get_current_version(self):
         """获取当前程序版本号"""
         try:
-            version_file = Path("version.txt")
+            version_file = Path("data/static/version.txt")
             if version_file.exists():
                 with open(version_file, "r") as f:
                     version = f.read().strip()
