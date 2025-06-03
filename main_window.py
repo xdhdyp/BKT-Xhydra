@@ -562,7 +562,7 @@ class MainWindow(QMainWindow):
         # 顶部关于信息
         about_label = QLabel(
             "<b>模拟考试系统</b><br>"
-            "版本：v1.2.18<br>"
+            f"版本：v{self._get_version()}<br>"
             "开发者：xdhdyp<br>"
             "更新地址：<a href='https://github.com/xdhdyp/Xdhdyp-BKT'>https://github.com/xdhdyp/Xdhdyp-BKT</a><br>"
             "<br>"
@@ -961,6 +961,18 @@ class MainWindow(QMainWindow):
         close_btn.clicked.connect(dialog.accept)
         layout.addWidget(close_btn)
         dialog.exec()
+
+    def _get_version(self):
+        """获取当前版本号"""
+        try:
+            version_file = Path("version.txt")
+            if version_file.exists():
+                with open(version_file, "r") as f:
+                    return f.read().strip()
+            return "1.2.18"  # 默认版本号
+        except Exception as e:
+            logging.error(f"读取版本号失败: {e}")
+            return "1.2.18"  # 默认版本号
 
 def auto_information(parent, title, text, timeout=1500):
     box = QMessageBox(parent)

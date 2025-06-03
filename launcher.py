@@ -24,6 +24,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def get_version():
+    """获取当前版本号"""
+    try:
+        version_file = Path("version.txt")
+        if version_file.exists():
+            with open(version_file, "r") as f:
+                return f.read().strip()
+        return "1.2.20"  # 默认版本号
+    except Exception as e:
+        logging.error(f"读取版本号失败: {e}")
+        return "1.2.20"  # 默认版本号
+
 def exception_hook(exctype, value, tb):
     """全局异常处理钩子"""
     error_msg = ''.join(traceback.format_exception(exctype, value, tb))
@@ -53,10 +65,10 @@ def setup_application():
         
         # 设置应用程序信息
         app = QApplication(sys.argv)
-        app.setApplicationName("原神！启动！！！")
-        app.setApplicationVersion("alpha")
-        app.setOrganizationName("原神！启动！！！")
-        app.setOrganizationDomain("原神！启动！！！")
+        app.setApplicationName("BKT模拟考试系统")
+        app.setApplicationVersion(get_version())
+        app.setOrganizationName("xdhdyp")
+        app.setOrganizationDomain("github.com/xdhdyp")
         
         # 设置应用程序样式
         app.setStyle('Fusion')
