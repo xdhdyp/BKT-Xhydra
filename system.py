@@ -9,7 +9,7 @@ from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import random
 import shutil
 import glob
@@ -18,39 +18,32 @@ import logging
 
 
 class QuestionSystem(QMainWindow):
-    # 定义信号
+    """题目系统主窗口类"""
     answer_submitted = pyqtSignal(dict)
 
     def __init__(self, username="admin"):
+        """初始化题目系统
+        
+        Args:
+            username (str): 用户名，默认为admin
+        """
         super().__init__()
         self.username = username
-        self.questions = []
-        self.original_indices = []  # 存储原始题号映射
-        self.current_question = 0
-        self.user_answers = {}
-        self.total_time = 50 * 60  # 50分钟倒计时
-        self.remaining_time = self.total_time
-        self.viewed_answers = set()  # 记录用户查看过答案的题目索引
+        self.questions = []  # 题目列表
+        self.original_indices = []  # 原始题号映射
+        self.current_question = 0  # 当前题目索引
+        self.user_answers = {}  # 用户答案
+        self.total_time = 50 * 60  # 总时间（秒）
+        self.remaining_time = self.total_time  # 剩余时间
+        self.viewed_answers = set()  # 已查看答案的题目集合
         self.submitted = False  # 是否已提交
-        self.start_time = None  # 记录开始时间
+        self.start_time = None  # 开始时间
         self.current_answer_file = None  # 当前答题文件路径
 
-        # 初始化必要的目录和文件
         self._init_directories_and_files()
-
-        # 设置窗口
-        self.setWindowTitle("Xdhdyp-BKT")
-        self.setGeometry(100, 100, 1344, 756)  # 16:9比例，占屏幕70%
-        self.center_window()
-
-        # 初始化界面
+        self._setup_window()
         self.init_ui()
-
-        # 设置定时器
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_timer)
-
-        # 尝试加载本地xlsx文件
+        self._setup_timer()
         self.load_local_excel()
 
     def _init_directories_and_files(self):
@@ -83,7 +76,7 @@ class QuestionSystem(QMainWindow):
                         'recommended_questions': []
                     }, f, ensure_ascii=False, indent=2)
 
-            # 处理所有历史记录，生成初始推荐
+            # 处理历史记录，生成初始推荐
             try:
                 from models.question_processor import QuestionProcessor
                 processor = QuestionProcessor(self.username)
@@ -93,6 +86,17 @@ class QuestionSystem(QMainWindow):
 
         except Exception as e:
             logging.error(f"初始化目录和文件失败: {e}")
+
+    def _setup_window(self):
+        """设置窗口属性"""
+        self.setWindowTitle("Xdhdyp-BKT")
+        self.setGeometry(100, 100, 1344, 756)
+        self.center_window()
+
+    def _setup_timer(self):
+        """设置定时器"""
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_timer)
 
     def center_window(self):
         """将窗口居中显示"""
@@ -107,21 +111,18 @@ class QuestionSystem(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
-        # 主布局
         main_layout = QHBoxLayout(central_widget)
-
-        # 左侧题号按钮区域
         self.create_question_buttons_area(main_layout)
-
-        # 右侧主要内容区域
         self.create_main_content_area(main_layout)
-
-        # 设置布局比例
         main_layout.setStretch(0, 3)  # 左侧占30%
         main_layout.setStretch(1, 7)  # 右侧占70%
 
     def create_question_buttons_area(self, parent_layout):
-        """创建左侧题号按钮区域"""
+        """创建左侧题号按钮区域
+        
+        Args:
+            parent_layout: 父布局
+        """
         left_frame = QFrame()
         left_frame.setFrameStyle(QFrame.Shape.Box)
         left_layout = QVBoxLayout(left_frame)
@@ -137,7 +138,7 @@ class QuestionSystem(QMainWindow):
         scroll_widget = QWidget()
         self.question_grid = QGridLayout(scroll_widget)
 
-        # 创建50个题号按钮
+        # 创建题号按钮
         self.question_buttons = []
         for i in range(50):
             btn = QPushButton(str(i + 1))
@@ -156,55 +157,61 @@ class QuestionSystem(QMainWindow):
 
         # 文件操作按钮
         file_layout = QVBoxLayout()
+        self._create_file_buttons(file_layout)
+        left_layout.addLayout(file_layout)
+        parent_layout.addWidget(left_frame)
 
+    def _create_file_buttons(self, layout):
+        """创建文件操作按钮
+        
+        Args:
+            layout: 按钮布局
+        """
         load_btn = QPushButton("加载Excel文件")
         load_btn.setFont(QFont("微软雅黑", 10))
         load_btn.clicked.connect(self.load_excel_file)
-        file_layout.addWidget(load_btn)
+        layout.addWidget(load_btn)
 
         save_btn = QPushButton("保存答案")
         save_btn.setFont(QFont("微软雅黑", 10))
         save_btn.clicked.connect(self.save_answers)
-        file_layout.addWidget(save_btn)
-
-        left_layout.addLayout(file_layout)
-        parent_layout.addWidget(left_frame)
+        layout.addWidget(save_btn)
 
     def create_main_content_area(self, parent_layout):
-        """创建右侧主要内容区域"""
+        """创建右侧主要内容区域
+        
+        Args:
+            parent_layout: 父布局
+        """
         right_frame = QFrame()
         right_frame.setFrameStyle(QFrame.Shape.Box)
         right_layout = QVBoxLayout(right_frame)
 
-        # 顶部信息栏
         self.create_top_info_bar(right_layout)
-
-        # 题目内容区域
         self.create_question_content_area(right_layout)
-
-        # 底部控制按钮
         self.create_bottom_controls(right_layout)
 
         parent_layout.addWidget(right_frame)
 
     def create_top_info_bar(self, parent_layout):
-        """创建顶部信息栏，并为统计项添加可点击按钮"""
+        """创建顶部信息栏
+        
+        Args:
+            parent_layout: 父布局
+        """
         top_layout = QHBoxLayout()
 
-        # 当前题号
         self.current_question_label = QLabel("请先导入题库")
         self.current_question_label.setFont(QFont("微软雅黑", 12, QFont.Weight.Bold))
         top_layout.addWidget(self.current_question_label)
 
         top_layout.addStretch()
 
-        # 倒计时
         self.timer_label = QLabel("剩余时间: --:--")
         self.timer_label.setFont(QFont("微软雅黑", 12, QFont.Weight.Bold))
         self.timer_label.setStyleSheet("color: red;")
         top_layout.addWidget(self.timer_label)
 
-        # 提交按钮
         submit_btn = QPushButton("提交")
         submit_btn.setFont(QFont("微软雅黑", 10))
         submit_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; padding: 5px 15px; }")
@@ -214,10 +221,15 @@ class QuestionSystem(QMainWindow):
         parent_layout.addLayout(top_layout)
 
     def create_question_content_area(self, parent_layout):
-        """创建题目内容区域"""
+        """创建题目内容区域
+        
+        Args:
+            parent_layout: 父布局
+        """
         content_frame = QFrame()
         content_frame.setFrameStyle(QFrame.Shape.StyledPanel)
         content_layout = QVBoxLayout(content_frame)
+
         # 题目文本
         self.question_text = QTextEdit()
         self.question_text.setFont(QFont("微软雅黑", 12))
@@ -225,85 +237,92 @@ class QuestionSystem(QMainWindow):
         self.question_text.setMaximumHeight(150)
         self.question_text.setText("没有题库，请点击左侧'加载Excel文件'按钮导入题目")
         content_layout.addWidget(self.question_text)
+
         # 选项区域
         self.options_layout = QVBoxLayout()
         self.option_group = QButtonGroup()
-        self.option_group.setExclusive(False)  # ✅ 允许取消选中
+        self.option_group.setExclusive(False)
         self.option_buttons = []
+        
         for i, option_text in enumerate(['A', 'B', 'C', 'D']):
             option_btn = QRadioButton(f"{option_text}. ")
             option_btn.setFont(QFont("微软雅黑", 11))
-            option_btn.setEnabled(False)  # 默认禁用
+            option_btn.setEnabled(False)
             self.option_group.addButton(option_btn, i)
             self.option_buttons.append(option_btn)
             self.options_layout.addWidget(option_btn)
+            
         content_layout.addLayout(self.options_layout)
+
         # 答案显示区域
         self.answer_frame = QFrame()
         self.answer_frame.setFrameStyle(QFrame.Shape.StyledPanel)
         self.answer_frame.setStyleSheet("background-color: #f0f0f0;")
         answer_layout = QVBoxLayout(self.answer_frame)
+        
         self.answer_label = QLabel("正确答案: ")
         self.answer_label.setFont(QFont("微软雅黑", 11, QFont.Weight.Bold))
         self.answer_label.setStyleSheet("color: green;")
         answer_layout.addWidget(self.answer_label)
-        self.answer_frame.hide()  # 默认隐藏答案
+        
+        self.answer_frame.hide()
         content_layout.addWidget(self.answer_frame)
         content_layout.addStretch()
         parent_layout.addWidget(content_frame)
 
     def create_bottom_controls(self, parent_layout):
-        """创建底部控制按钮"""
+        """创建底部控制按钮
+        
+        Args:
+            parent_layout: 父布局
+        """
         bottom_layout = QHBoxLayout()
-
-        # 设置按钮统一宽度
         btn_width = 100
 
         # 上一题按钮
         self.prev_btn = QPushButton("上一题")
         self.prev_btn.setFont(QFont("微软雅黑", 10))
-        self.prev_btn.setEnabled(False)  # 默认禁用
+        self.prev_btn.setEnabled(False)
         self.prev_btn.clicked.connect(self.previous_question)
-        # 修改：设置固定宽度
         self.prev_btn.setFixedWidth(btn_width)
         bottom_layout.addWidget(self.prev_btn)
 
         # 查看答案按钮
         self.show_answer_btn = QPushButton("查看答案")
         self.show_answer_btn.setFont(QFont("微软雅黑", 10))
-        self.show_answer_btn.setEnabled(False)  # 默认禁用
+        self.show_answer_btn.setEnabled(False)
         self.show_answer_btn.clicked.connect(self.toggle_answer)
-        # 修改：设置固定宽度
         self.show_answer_btn.setFixedWidth(btn_width)
-        # 中间添加伸缩空间
-        bottom_layout.addStretch()  # 新增：让中间按钮居中
+        
+        bottom_layout.addStretch()
         bottom_layout.addWidget(self.show_answer_btn)
-        bottom_layout.addStretch()  # 新增：让中间按钮居中
+        bottom_layout.addStretch()
 
         # 下一题按钮
         self.next_btn = QPushButton("下一题")
         self.next_btn.setFont(QFont("微软雅黑", 10))
-        self.next_btn.setEnabled(False)  # 默认禁用
+        self.next_btn.setEnabled(False)
         self.next_btn.clicked.connect(self.next_question)
-        # 修改：设置固定宽度
         self.next_btn.setFixedWidth(btn_width)
         bottom_layout.addWidget(self.next_btn)
 
         parent_layout.addLayout(bottom_layout)
 
     def load_local_excel(self):
-        """尝试加载本地Excel文件"""
+        """加载本地Excel题库文件"""
         local_file = os.path.join(os.getcwd(), "data", "static", "单选题.xlsx")
         logging.info(f"尝试加载题库文件: {local_file}")
+        
         if os.path.exists(local_file):
             self.load_excel_from_path(local_file)
         else:
             logging.error("题库文件不存在！")
             self.show_no_questions_message()
-        self.current_answer_file = None  # 新增：当前答题文件路径
+            
+        self.current_answer_file = None
 
     def show_no_questions_message(self):
-        """显示没有题库的提示信息"""
+        """显示无题库提示信息"""
         self.current_question_label.setText("没有题库，请导入")
         self.timer_label.setText("剩余时间: --:--")
         self.question_text.setText("没有题库，请点击左侧'加载Excel文件'按钮导入题目")
@@ -321,17 +340,21 @@ class QuestionSystem(QMainWindow):
         self.show_answer_btn.setEnabled(False)
 
     def load_excel_from_path(self, file_path):
-        """从指定路径加载Excel文件"""
+        """从指定路径加载Excel文件
+        
+        Args:
+            file_path (str): Excel文件路径
+        """
         try:
             df = pd.read_excel(file_path)
             required_columns = ['题号', '题目', '选项A', '选项B', '选项C', '选项D', '答案']
+            
             if all(col in df.columns for col in required_columns):
                 original_data = df.to_dict('records')
-                # 每次都重新初始化题目顺序
                 self.original_indices = random.sample(range(len(original_data)), 50)
                 self.questions = [original_data[i] for i in self.original_indices]
                 
-                # 新增：判断单选/多选
+                # 判断单选/多选
                 for q in self.questions:
                     ans = str(q['答案']).strip()
                     q['is_multi'] = len(ans) > 1
@@ -339,18 +362,15 @@ class QuestionSystem(QMainWindow):
                 self.current_question = 0
                 self.user_answers = {}
                 self.submitted = False
-                self.start_time = datetime.now()  # 记录开始时间
+                self.start_time = datetime.now()
                 
-                # 启用界面控件
                 self.enable_interface()
                 self.update_question_display()
                 self.update_question_buttons()
                 
-                # 重置并开始倒计时
                 self.remaining_time = self.total_time
                 self.timer.start(1000)
                 
-                # 创建保存目录
                 os.makedirs('data/recommendation', exist_ok=True)
                 
                 auto_information(self, "成功", f"成功加载 {len(self.questions)} 道题目")
@@ -402,7 +422,6 @@ class QuestionSystem(QMainWindow):
         self.option_buttons = []
         
         question = self.questions[self.current_question]
-        # 设置单选/多选模式
         self.option_group.setExclusive(not question.get('is_multi', False))
         
         # 创建新的选项按钮
@@ -425,7 +444,7 @@ class QuestionSystem(QMainWindow):
         if self.current_question in self.user_answers:
             answer = self.user_answers[self.current_question]
             if question.get('is_multi', False):
-                # 多选，answer为字符串如"AC"
+                # 多选
                 for i, btn in enumerate(self.option_buttons):
                     if chr(ord('A') + i) in answer:
                         btn.setChecked(True)
@@ -753,6 +772,17 @@ class QuestionSystem(QMainWindow):
                     "attempt_count": data["attempt_count"]
                 }
                 for q_id, data in mastery.items()
+            },
+            "review_history": {
+                str(q_id): {
+                    "review_count": 0,
+                    "last_review_time": datetime.now().isoformat(),
+                    "next_review_time": (datetime.now() + timedelta(days=1)).isoformat(),
+                    "memory_strength": 0.0,
+                    "correct_count": 0,
+                    "total_count": 0
+                }
+                for q_id in range(len(self.questions))
             }
         }
 
@@ -793,17 +823,6 @@ class QuestionSystem(QMainWindow):
             from models.question_processor import QuestionProcessor
             processor = QuestionProcessor(self.username)
             processor.process_answer_file(file_path)
-
-            # 删除旧的推荐文件
-            recommendation_dir = Path("data/models/model_yh")
-            if recommendation_dir.exists():
-                old_recommendations = list(recommendation_dir.glob("recommendation_*.json"))
-                for old_file in old_recommendations:
-                    try:
-                        old_file.unlink()
-                        logging.info(f"成功删除旧推荐文件: {old_file}")
-                    except Exception as e:
-                        logging.error(f"删除旧推荐文件失败 {old_file}: {e}")
 
         except Exception as e:
             logging.error(f"保存历史记录失败: {e}")
