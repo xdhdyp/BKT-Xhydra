@@ -3,47 +3,55 @@ import pandas as pd
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QPushButton, QLabel, QRadioButton, QButtonGroup,
-    QScrollArea, QFrame, QFileDialog, QMessageBox, QTextEdit
+    QScrollArea, QFrame, QFileDialog, QMessageBox, QTextEdit,
 )
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 import random
-import shutil
-import glob
 from pathlib import Path
 import logging
 
+# 导入 AI 解答模块
+from ai_explanation import AIExplanationDialog
 
 class QuestionSystem(QMainWindow):
-    """题目系统主窗口类"""
+    # 定义信号
     answer_submitted = pyqtSignal(dict)
 
     def __init__(self, username="admin"):
-        """初始化题目系统
-        
-        Args:
-            username (str): 用户名，默认为admin
-        """
         super().__init__()
         self.username = username
-        self.questions = []  # 题目列表
-        self.original_indices = []  # 原始题号映射
-        self.current_question = 0  # 当前题目索引
-        self.user_answers = {}  # 用户答案
-        self.total_time = 50 * 60  # 总时间（秒）
-        self.remaining_time = self.total_time  # 剩余时间
-        self.viewed_answers = set()  # 已查看答案的题目集合
+        self.questions = []
+        self.original_indices = []  # 存储原始题号映射
+        self.current_question = 0
+        self.user_answers = {}
+        self.total_time = 60 * 60  # 60分钟倒计时
+        self.remaining_time = self.total_time
+        self.viewed_answers = set()  # 记录用户查看过答案的题目索引
         self.submitted = False  # 是否已提交
-        self.start_time = None  # 开始时间
+        self.start_time = None  # 记录开始时间
         self.current_answer_file = None  # 当前答题文件路径
+        self.ai_explanation_dialog = None # AI解答对话框实例
 
+        # 初始化必要的目录和文件
         self._init_directories_and_files()
-        self._setup_window()
+
+        # 设置窗口
+        self.setWindowTitle("Xdhdyp-BKT")
+        self.setGeometry(100, 100, 1344, 756)  # 16:9比例，占屏幕70%
+        self.center_window()
+
+        # 初始化界面
         self.init_ui()
-        self._setup_timer()
+
+        # 设置定时器
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_timer)
+
+        # 尝试加载本地xlsx文件
         self.load_local_excel()
 
     def _init_directories_and_files(self):
@@ -76,7 +84,7 @@ class QuestionSystem(QMainWindow):
                         'recommended_questions': []
                     }, f, ensure_ascii=False, indent=2)
 
-            # 处理历史记录，生成初始推荐
+            # 处理所有历史记录，生成初始推荐
             try:
                 from models.question_processor import QuestionProcessor
                 processor = QuestionProcessor(self.username)
@@ -87,24 +95,40 @@ class QuestionSystem(QMainWindow):
         except Exception as e:
             logging.error(f"初始化目录和文件失败: {e}")
 
-    def _setup_window(self):
-        """设置窗口属性"""
-        self.setWindowTitle("Xdhdyp-BKT")
-        self.setGeometry(100, 100, 1344, 756)
-        self.center_window()
-
-    def _setup_timer(self):
-        """设置定时器"""
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_timer)
-
     def center_window(self):
-        """将窗口居中显示"""
-        screen = QApplication.primaryScreen().geometry()
-        window = self.geometry()
-        x = (screen.width() - window.width()) // 2
-        y = (screen.height() - window.height()) // 2
-        self.move(x, y)
+        """将窗口居中显示，考虑高 DPI 显示"""
+        # 获取主屏幕
+        screen = QApplication.primaryScreen()
+        
+        # 获取屏幕信息
+        screen_geometry = screen.geometry()
+        available_geometry = screen.availableGeometry()
+        
+        # 计算任务栏位置
+        taskbar_top = available_geometry.height()  # 任务栏顶部位置
+        
+        # 强制使用任务栏顶部到屏幕顶部的区域
+        available_width = screen_geometry.width()
+        available_height = taskbar_top
+        
+        # 设置基础窗口尺寸（保持16:9的比例）
+        base_width = 1344  # 基础宽度
+        base_height = 756  # 基础高度
+
+        # 计算窗口尺寸
+        window_width = base_width
+        window_height = base_height
+
+        # 计算窗口位置，确保完全在可用屏幕区域内居中
+        x = (available_width - window_width) // 2
+        y = (available_height - window_height) // 2
+
+        # 确保窗口不会超出屏幕边界
+        x = max(20, min(x, available_width - window_width - 20))
+        y = max(20, min(y, available_height - window_height - 20))
+
+        # 设置窗口位置和大小
+        self.setGeometry(x, y, window_width, window_height)
 
     def init_ui(self):
         """初始化用户界面"""
@@ -294,8 +318,16 @@ class QuestionSystem(QMainWindow):
         self.show_answer_btn.clicked.connect(self.toggle_answer)
         self.show_answer_btn.setFixedWidth(btn_width)
         
+        # AI 解答按钮
+        self.ai_explain_btn = QPushButton("AI 解答")
+        self.ai_explain_btn.setFont(QFont("微软雅黑", 10))
+        self.ai_explain_btn.setEnabled(False)  # 默认禁用，提交后启用
+        self.ai_explain_btn.clicked.connect(self._show_ai_explanation_dialog)
+        self.ai_explain_btn.setFixedWidth(btn_width)
+        
         bottom_layout.addStretch()
         bottom_layout.addWidget(self.show_answer_btn)
+        bottom_layout.addWidget(self.ai_explain_btn)
         bottom_layout.addStretch()
 
         # 下一题按钮
@@ -308,21 +340,41 @@ class QuestionSystem(QMainWindow):
 
         parent_layout.addLayout(bottom_layout)
 
+    def _show_ai_explanation_dialog(self):
+        """显示 AI 解答对话框"""
+        if not self.submitted:
+            auto_warning(self, "提示", "请先提交试卷，才能查看 AI 解答。")
+            return
+            
+        if not self.questions:
+            auto_warning(self, "提示", "当前没有加载题目。")
+            return
+
+        # 获取用户答案
+        user_answer = ""
+        for option in self.option_buttons:
+            if option.isChecked():
+                user_answer = option.text()
+                break
+        
+        # 创建并显示 AI 解答对话框
+        dialog = AIExplanationDialog(self, self.questions[self.current_question], user_answer)
+        if not getattr(dialog, "_cancelled", False):
+            dialog.exec()
+
     def load_local_excel(self):
-        """加载本地Excel题库文件"""
+        """尝试加载本地Excel文件"""
         local_file = os.path.join(os.getcwd(), "data", "static", "单选题.xlsx")
         logging.info(f"尝试加载题库文件: {local_file}")
-        
         if os.path.exists(local_file):
             self.load_excel_from_path(local_file)
         else:
             logging.error("题库文件不存在！")
             self.show_no_questions_message()
-            
-        self.current_answer_file = None
+        self.current_answer_file = None  # 新增：当前答题文件路径
 
     def show_no_questions_message(self):
-        """显示无题库提示信息"""
+        """显示没有题库的提示信息"""
         self.current_question_label.setText("没有题库，请导入")
         self.timer_label.setText("剩余时间: --:--")
         self.question_text.setText("没有题库，请点击左侧'加载Excel文件'按钮导入题目")
@@ -340,21 +392,17 @@ class QuestionSystem(QMainWindow):
         self.show_answer_btn.setEnabled(False)
 
     def load_excel_from_path(self, file_path):
-        """从指定路径加载Excel文件
-        
-        Args:
-            file_path (str): Excel文件路径
-        """
+        """从指定路径加载Excel文件"""
         try:
             df = pd.read_excel(file_path)
             required_columns = ['题号', '题目', '选项A', '选项B', '选项C', '选项D', '答案']
-            
             if all(col in df.columns for col in required_columns):
                 original_data = df.to_dict('records')
+                # 每次都重新初始化题目顺序
                 self.original_indices = random.sample(range(len(original_data)), 50)
                 self.questions = [original_data[i] for i in self.original_indices]
                 
-                # 判断单选/多选
+                # 新增：判断单选/多选
                 for q in self.questions:
                     ans = str(q['答案']).strip()
                     q['is_multi'] = len(ans) > 1
@@ -362,15 +410,18 @@ class QuestionSystem(QMainWindow):
                 self.current_question = 0
                 self.user_answers = {}
                 self.submitted = False
-                self.start_time = datetime.now()
+                self.start_time = datetime.now()  # 记录开始时间
                 
+                # 启用界面控件
                 self.enable_interface()
                 self.update_question_display()
                 self.update_question_buttons()
                 
+                # 重置并开始倒计时
                 self.remaining_time = self.total_time
                 self.timer.start(1000)
                 
+                # 创建保存目录
                 os.makedirs('data/recommendation', exist_ok=True)
                 
                 auto_information(self, "成功", f"成功加载 {len(self.questions)} 道题目")
@@ -422,6 +473,7 @@ class QuestionSystem(QMainWindow):
         self.option_buttons = []
         
         question = self.questions[self.current_question]
+        # 设置单选/多选模式
         self.option_group.setExclusive(not question.get('is_multi', False))
         
         # 创建新的选项按钮
@@ -444,7 +496,7 @@ class QuestionSystem(QMainWindow):
         if self.current_question in self.user_answers:
             answer = self.user_answers[self.current_question]
             if question.get('is_multi', False):
-                # 多选
+                # 多选，answer为字符串如"AC"
                 for i, btn in enumerate(self.option_buttons):
                     if chr(ord('A') + i) in answer:
                         btn.setChecked(True)
@@ -725,8 +777,11 @@ class QuestionSystem(QMainWindow):
             correct_rate = mastery_data['correct_rate']
             attempt_count = mastery_data['attempt_count']
             
-            # 如果BKT掌握概率大于0.7，且正确率大于0.6，且至少做过2次，则认为已掌握
-            if bkt_prob > 0.7 and correct_rate > 0.6 and attempt_count >= 2:
+            # 计算正确次数
+            correct_count = int(correct_rate * attempt_count)
+            
+            # 如果BKT掌握概率大于0.7，且正确率大于0.6，且至少做对6次，则认为已掌握
+            if bkt_prob > 0.7 and correct_rate > 0.6 and correct_count >= 6:
                 mastered_questions.add(int(q_id) - 1)  # 转换回0开始的索引
 
         # 显示所有答案
@@ -772,17 +827,6 @@ class QuestionSystem(QMainWindow):
                     "attempt_count": data["attempt_count"]
                 }
                 for q_id, data in mastery.items()
-            },
-            "review_history": {
-                str(q_id): {
-                    "review_count": 0,
-                    "last_review_time": datetime.now().isoformat(),
-                    "next_review_time": (datetime.now() + timedelta(days=1)).isoformat(),
-                    "memory_strength": 0.0,
-                    "correct_count": 0,
-                    "total_count": 0
-                }
-                for q_id in range(len(self.questions))
             }
         }
 
@@ -824,6 +868,17 @@ class QuestionSystem(QMainWindow):
             processor = QuestionProcessor(self.username)
             processor.process_answer_file(file_path)
 
+            # 删除旧的推荐文件
+            recommendation_dir = Path("data/models/model_yh")
+            if recommendation_dir.exists():
+                old_recommendations = list(recommendation_dir.glob("recommendation_*.json"))
+                for old_file in old_recommendations:
+                    try:
+                        old_file.unlink()
+                        logging.info(f"成功删除旧推荐文件: {old_file}")
+                    except Exception as e:
+                        logging.error(f"删除旧推荐文件失败 {old_file}: {e}")
+
         except Exception as e:
             logging.error(f"保存历史记录失败: {e}")
 
@@ -852,8 +907,8 @@ class QuestionSystem(QMainWindow):
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 
-            # 检查是否超过考试时间
-            if 'start_time' in data:
+            # 检查是否超过考试时间（只在未提交时检查）
+            if not data.get('submitted', False) and 'start_time' in data:
                 start_time = datetime.fromisoformat(data['start_time'])
                 current_time = datetime.now()
                 time_diff = (current_time - start_time).total_seconds()
@@ -885,8 +940,9 @@ class QuestionSystem(QMainWindow):
                     self.remaining_time = self.total_time - int(time_diff)
                     self.timer.start(1000)
             else:
-                self.remaining_time = self.total_time
-                self.timer.start(1000)
+                # 如果是已提交的试卷，直接设置剩余时间为0
+                self.remaining_time = 0
+                self.timer.stop()
 
             # 恢复原始题号映射
             if 'original_indices' in data:

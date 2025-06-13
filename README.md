@@ -173,7 +173,7 @@ BKT-Xhydra/
 
 ## 📄 授权条款
 
-本项目采用 **[MIT 许可证](otherfiles/LICENSE)** 发布，允许商业和非商业用途的免费使用。
+本项目采用 **[MIT 许可证](LICENSE)** 发布，允许商业和非商业用途的免费使用。
 
 ## 👨‍💻 开发团队
 
@@ -186,7 +186,7 @@ BKT-Xhydra/
 
 ## 📝 开发声明
 
-本项目由 xdhdyp 与 Cursor AI 共同开发完成。项目采用 MIT 许可证发布，详细条款请参见 [LICENSE](otherfiles/LICENSE) 文件。
+本项目由 xdhdyp 与 Cursor AI 共同开发完成。项目采用 MIT 许可证发布，详细条款请参见 [LICENSE](LICENSE) 文件。
 
 ### 功能完善度说明
 
